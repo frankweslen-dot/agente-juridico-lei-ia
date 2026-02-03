@@ -7,7 +7,8 @@ from oauth2client.service_account import ServiceAccountCredentials
 import json
 
 # --- CONFIGURAÇÃO DA PÁGINA ---
-st.set_page_config(page_title="Leis Municipal IA", layout="wide")
+# Correção 1: Título da aba do navegador
+st.set_page_config(page_title="Leis Municipais IA", layout="wide")
 
 # --- CONEXÃO COM GOOGLE SHEETS ---
 def connect_to_sheets():
@@ -73,8 +74,9 @@ if "cidade_selecionada" not in st.session_state:
 if not st.session_state["logado"]:
     
     # --- AJUSTE VISUAL (TÍTULO + COPYRIGHT COLADOS) ---
+    # Correção 2: Título principal na tela de login
     st.markdown("""
-        <h1 style='margin-bottom: -15px;'>🏛️ Leis Municipal IA</h1>
+        <h1 style='margin-bottom: -15px;'>🏛️ Leis Municipais IA</h1>
         <small style='color: grey; font-size: 12px;'>© Lopes & Souto Advogados Associados</small>
         <hr style='margin-top: 5px; margin-bottom: 20px;'>
     """, unsafe_allow_html=True)
