@@ -2,18 +2,17 @@ import streamlit as st
 import google.generativeai as genai
 import pandas as pd
 import hashlib
-from google.colab import userdata
 
 # --- CONFIGURAÇÃO INICIAL ---
 st.set_page_config(page_title="Agente Jurídico IA", layout="wide")
 
-# Tenta pegar a chave API (se falhar, pede na tela)
+# Configuração da Chave de API (Secrets do Streamlit)
 try:
-    api_key = userdata.get('GOOGLE_API_KEY')
+    api_key = st.secrets["GOOGLE_API_KEY"]
     genai.configure(api_key=api_key)
-except:
-    st.warning("Chave de API não encontrada automaticamente.")
-
+except Exception as e:
+    st.error("⚠️ Chave de API não configurada. Adicione-a nos 'Secrets' do Streamlit Cloud.")
+    
 # --- DADOS E LÓGICA (BACK-END) ---
 
 # 1. Base de Usuários (Simulação)
