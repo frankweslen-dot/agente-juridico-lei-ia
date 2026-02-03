@@ -7,13 +7,11 @@ from oauth2client.service_account import ServiceAccountCredentials
 import json
 
 # --- CONFIGURAÇÃO DA PÁGINA ---
-# Correção 1: Título da aba do navegador
 st.set_page_config(page_title="Leis Municipais IA", layout="wide")
 
 # --- CONEXÃO COM GOOGLE SHEETS ---
 def connect_to_sheets():
     try:
-        # Pega as credenciais do cofre do Streamlit
         scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
         creds_dict = json.loads(st.secrets["connections"]["gsheets"]["creds"])
         creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
@@ -36,13 +34,11 @@ def carregar_usuarios(sheet):
 def registrar_usuario(sheet, nome, usuario, senha):
     worksheet = sheet.worksheet("usuarios")
     senha_hash = hash_password(senha)
-    # Adiciona: username, password, name, cities, permissions, status
     worksheet.append_row([usuario, senha_hash, nome, "NENHUMA", "LER", "Pendente"])
 
 def atualizar_usuario(sheet, usuario_alvo, nova_cidade, novo_status, nova_permissao):
     worksheet = sheet.worksheet("usuarios")
     cell = worksheet.find(usuario_alvo)
-    # Colunas: D=4 (Cidades), E=5 (Permissões), F=6 (Status)
     worksheet.update_cell(cell.row, 4, nova_cidade)
     worksheet.update_cell(cell.row, 5, nova_permissao)
     worksheet.update_cell(cell.row, 6, novo_status)
@@ -73,8 +69,7 @@ if "cidade_selecionada" not in st.session_state:
 # TELA DE LOGIN / CADASTRO
 if not st.session_state["logado"]:
     
-    # --- AJUSTE VISUAL (TÍTULO + COPYRIGHT COLADOS) ---
-    # Correção 2: Título principal na tela de login
+    # --- CABEÇALHO DA TELA DE LOGIN ---
     st.markdown("""
         <h1 style='margin-bottom: -15px;'>🏛️ Leis Municipais IA</h1>
         <small style='color: grey; font-size: 12px;'>© Lopes & Souto Advogados Associados</small>
@@ -83,7 +78,7 @@ if not st.session_state["logado"]:
     
     tab1, tab2 = st.tabs(["Entrar", "Criar Conta"])
 
-    with tab1: # Login
+    with tab1:
         usuario = st.text_input("Usuário")
         senha = st.text_input("Senha", type="password")
         if st.button("Entrar"):
@@ -91,11 +86,9 @@ if not st.session_state["logado"]:
                 try:
                     df_users = carregar_usuarios(sheet)
                     user_match = df_users[df_users['username'] == usuario]
-                    
                     if not user_match.empty:
                         stored_pass = str(user_match.iloc[0]['password'])
                         status = str(user_match.iloc[0]['status']) if 'status' in user_match.columns else 'Aprovado'
-                        
                         if stored_pass == hash_password(senha):
                             if status == "Aprovado" or usuario == "admin":
                                 st.session_state["logado"] = True
@@ -110,7 +103,7 @@ if not st.session_state["logado"]:
                 except Exception as e:
                     st.error(f"Erro ao ler usuários: {e}")
 
-    with tab2: # Cadastro
+    with tab2:
         novo_nome = st.text_input("Nome Completo")
         novo_user = st.text_input("Escolha um Usuário")
         nova_senha = st.text_input("Escolha uma Senha", type="password")
@@ -130,8 +123,15 @@ if not st.session_state["logado"]:
 else:
     user = st.session_state["usuario_atual"]
     
-    # BARRA LATERAL
+    # --- BARRA LATERAL (AGORA COM IDENTIDADE VISUAL) ---
     with st.sidebar:
+        # AQUI ESTÁ A MÁGICA: O MESMO BLOCO HTML, AJUSTADO PARA O SIDEBAR
+        st.markdown("""
+            <h2 style='margin-bottom: -10px;'>🏛️ Leis Municipais IA</h2>
+            <small style='color: grey; font-size: 11px;'>© Lopes & Souto Advogados Associados</small>
+            <hr style='margin-top: 5px; margin-bottom: 15px;'>
+        """, unsafe_allow_html=True)
+
         st.header(f"Olá, {user['name']}")
         st.caption(f"Perfil: {user.get('permissions', 'LER')}")
         
@@ -160,7 +160,6 @@ else:
             senha_atual = st.text_input("Senha Atual", type="password")
             nova_senha_1 = st.text_input("Nova Senha", type="password")
             nova_senha_2 = st.text_input("Confirmar", type="password")
-            
             if st.button("Salvar"):
                 if hash_password(senha_atual) == str(user['password']):
                     if nova_senha_1 == nova_senha_2 and nova_senha_1 != "":
