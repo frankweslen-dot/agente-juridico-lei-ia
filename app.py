@@ -2,113 +2,186 @@ import streamlit as st
 import google.generativeai as genai
 import pandas as pd
 import hashlib
+import gspread
+from oauth2client.service_account import ServiceAccountCredentials
+import json
 
-# --- CONFIGURAÇÃO INICIAL ---
+# --- CONFIGURAÇÃO DA PÁGINA ---
 st.set_page_config(page_title="Agente Jurídico IA", layout="wide")
 
-# Configuração da Chave de API (Secrets do Streamlit)
+# --- CONEXÃO COM GOOGLE SHEETS (MEMÓRIA) ---
+def connect_to_sheets():
+    try:
+        # Pega as credenciais do cofre do Streamlit
+        scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+        creds_dict = json.loads(st.secrets["connections"]["gsheets"]["creds"])
+        creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+        client = gspread.authorize(creds)
+        # Abre a planilha
+        sheet = client.open("base_juridica_ia")
+        return sheet
+    except Exception as e:
+        st.error(f"Erro ao conectar na planilha: {e}")
+        return None
+
+# --- FUNÇÕES DE SEGURANÇA E USUÁRIOS ---
+def hash_password(password):
+    return hashlib.sha256(str.encode(password)).hexdigest()
+
+def carregar_usuarios(sheet):
+    worksheet = sheet.worksheet("usuarios")
+    data = worksheet.get_all_records()
+    return pd.DataFrame(data)
+
+def registrar_usuario(sheet, nome, usuario, senha):
+    worksheet = sheet.worksheet("usuarios")
+    senha_hash = hash_password(senha)
+    # Adiciona nova linha: username, password, name, cities, permissions, status
+    worksheet.append_row([usuario, senha_hash, nome, "NENHUMA", "LER", "Pendente"])
+
+def atualizar_usuario(sheet, usuario_alvo, nova_cidade, novo_status, nova_permissao):
+    worksheet = sheet.worksheet("usuarios")
+    cell = worksheet.find(usuario_alvo)
+    # Atualiza colunas: D (Cidade), E (Permissao), F (Status)
+    worksheet.update_cell(cell.row, 4, nova_cidade)
+    worksheet.update_cell(cell.row, 5, nova_permissao)
+    worksheet.update_cell(cell.row, 6, novo_status)
+
+# --- CONFIGURAÇÃO GEMINI ---
 try:
     api_key = st.secrets["GOOGLE_API_KEY"]
     genai.configure(api_key=api_key)
-except Exception as e:
-    st.error("⚠️ Chave de API não configurada. Adicione-a nos 'Secrets' do Streamlit Cloud.")
-    
-# --- DADOS E LÓGICA (BACK-END) ---
+except:
+    st.error("Configure a GOOGLE_API_KEY nos Secrets.")
 
-# 1. Base de Usuários (Simulação)
-base_usuarios = {
-    "junior": {"nome": "João Silva", "senha": "123", "cidades": ["São Paulo"], "permissoes": ["LER", "UPLOAD"]},
-    "senior": {"nome": "Maria Costa", "senha": "456", "cidades": ["São Paulo", "Rio de Janeiro"], "permissoes": ["LER", "UPLOAD"]},
-    "admin": {"nome": "Sócio Fundador", "senha": "admin", "cidades": ["TODAS"], "permissoes": ["LER", "UPLOAD", "DELETE"]}
-}
+# --- INTERFACE PRINCIPAL ---
 
-# 2. Funções de IA e Dados
-def consultar_advogado(pergunta, modelo_nome="gemini-2.5-flash"):
-    model = genai.GenerativeModel(modelo_nome)
-    prompt = f"""
-    Atue como Advogado Sênior Especialista em Direito Municipal.
-    Responda à pergunta com base no conhecimento jurídico geral (nesta versão demo):
-    
-    Pergunta: {pergunta}
-    """
-    return model.generate_content(prompt).text
+# Conecta ao banco
+sheet = connect_to_sheets()
 
-# --- INTERFACE (FRONT-END) ---
+if "logado" not in st.session_state:
+    st.session_state["logado"] = False
+    st.session_state["usuario_atual"] = {}
 
-# Título Principal
-st.title("⚖️ Sistema de Inteligência Jurídica Municipal")
+# TELA DE LOGIN / CADASTRO
+if not st.session_state["logado"]:
+    st.title("⚖️ Sistema de Inteligência Jurídica")
+    tab1, tab2 = st.tabs(["Entrar", "Criar Conta"])
 
-# Verifica se está logado
-if 'usuario_logado' not in st.session_state:
-    st.session_state['usuario_logado'] = None
-
-# --- TELA DE LOGIN ---
-if st.session_state['usuario_logado'] is None:
-    col1, col2, col3 = st.columns([1,2,1])
-    with col2:
-        st.header("🔐 Acesso Restrito")
+    with tab1: # Login
         usuario = st.text_input("Usuário")
         senha = st.text_input("Senha", type="password")
-        
         if st.button("Entrar"):
-            user_data = base_usuarios.get(usuario)
-            if user_data and user_data['senha'] == senha:
-                st.session_state['usuario_logado'] = usuario
-                st.session_state['dados_usuario'] = user_data
-                st.rerun() # Recarrega a página
-            else:
-                st.error("Usuário ou senha incorretos")
+            if sheet:
+                try:
+                    df_users = carregar_usuarios(sheet)
+                    # Verifica se usuário existe
+                    user_match = df_users[df_users['username'] == usuario]
+                    
+                    if not user_match.empty:
+                        # Verifica senha e status
+                        stored_pass = str(user_match.iloc[0]['password'])
+                        # Tenta pegar o status, se não existir assume Aprovado (para compatibilidade)
+                        status = str(user_match.iloc[0]['status']) if 'status' in user_match.columns else 'Aprovado'
+                        
+                        if stored_pass == hash_password(senha):
+                            if status == "Aprovado" or usuario == "admin": # Admin sempre entra
+                                st.session_state["logado"] = True
+                                st.session_state["usuario_atual"] = user_match.iloc[0].to_dict()
+                                st.rerun()
+                            else:
+                                st.warning("🔒 Seu cadastro ainda está pendente de aprovação.")
+                        else:
+                            st.error("Senha incorreta.")
+                    else:
+                        st.error("Usuário não encontrado.")
+                except Exception as e:
+                    st.error(f"Erro ao ler usuários: {e}")
 
-# --- TELA DO SISTEMA (PÓS-LOGIN) ---
+    with tab2: # Cadastro
+        novo_nome = st.text_input("Nome Completo")
+        novo_user = st.text_input("Escolha um Usuário")
+        nova_senha = st.text_input("Escolha uma Senha", type="password")
+        if st.button("Solicitar Acesso"):
+            if sheet:
+                try:
+                    df_users = carregar_usuarios(sheet)
+                    if novo_user in df_users['username'].values:
+                        st.error("Este usuário já existe.")
+                    else:
+                        registrar_usuario(sheet, novo_nome, novo_user, nova_senha)
+                        st.success("Cadastro enviado! Aguarde aprovação do administrador.")
+                except Exception as e:
+                     st.error(f"Erro no cadastro: {e}")
+
+# TELA DO SISTEMA (APÓS LOGIN)
 else:
-    dados = st.session_state['dados_usuario']
+    user = st.session_state["usuario_atual"]
     
-    # BARRA LATERAL (Menu)
+    # BARRA LATERAL
     with st.sidebar:
-        st.info(f"👤 Olá, {dados['nome']}")
-        
-        # 1. Seletor de Cidade (Respeitando permissões)
-        if "TODAS" in dados['cidades']:
-            cidades_disponiveis = ["São Paulo", "Rio de Janeiro", "Belo Horizonte", "Curitiba"]
-        else:
-            cidades_disponiveis = dados['cidades']
-            
-        cidade_selecionada = st.selectbox("📂 Selecione o Acervo:", cidades_disponiveis)
-        st.divider()
-        
-        # 2. Área de Upload (Só aparece se tiver permissão)
-        if "UPLOAD" in dados['permissoes']:
-            st.subheader("⬆️ Enviar Nova Lei")
-            arquivo = st.file_uploader("Solte o PDF aqui", type=["pdf"])
-            if arquivo:
-                # Aqui entraria aquela lógica de hash/duplicidade que criamos
-                st.success(f"Arquivo '{arquivo.name}' enviado para análise!")
-        
-        st.divider()
+        st.write(f"Olá, **{user['name']}**")
+        st.write(f"Permissão: `{user.get('permissions', 'LER')}`")
         if st.button("Sair"):
-            st.session_state['usuario_logado'] = None
+            st.session_state["logado"] = False
             st.rerun()
-
-    # ÁREA PRINCIPAL (Chat)
-    st.subheader(f"💬 Consultor Jurídico - Base: {cidade_selecionada}")
     
-    # Histórico de Chat (Memória visual)
-    if "mensagens" not in st.session_state:
-        st.session_state["mensagens"] = [{"role": "ai", "content": "Olá! Sou seu assistente jurídico. Qual dúvida deseja analisar no acervo hoje?"}]
+    # ÁREA DO ADMINISTRADOR
+    permissions = str(user.get('permissions', ''))
+    if "DELETE" in permissions or user['username'] == 'admin':
+        with st.expander("👮 Painel de Gestão de Usuários (Admin)", expanded=True):
+            st.write("Gerencie quem pode acessar o sistema.")
+            if sheet:
+                df_users = carregar_usuarios(sheet)
+                
+                # Edição rápida
+                lista_usuarios = df_users['username'].tolist()
+                edit_user = st.selectbox("Selecione o Usuário para Editar", lista_usuarios)
+                
+                if edit_user:
+                    user_data = df_users[df_users['username'] == edit_user].iloc[0]
+                    
+                    col1, col2, col3 = st.columns(3)
+                    with col1:
+                        current_status = user_data.get('status', 'Pendente')
+                        status_opts = ["Pendente", "Aprovado", "Bloqueado"]
+                        index_status = status_opts.index(current_status) if current_status in status_opts else 0
+                        new_status = st.selectbox("Status", status_opts, index=index_status)
+                    with col2:
+                        new_city = st.text_input("Cidades (separar por vírgula)", value=user_data.get('cities', ''))
+                    with col3:
+                        perm_opts = ["LER", "LER,UPLOAD", "LER,UPLOAD,DELETE"]
+                        current_perm = user_data.get('permissions', 'LER')
+                        index_perm = perm_opts.index(current_perm) if current_perm in perm_opts else 0
+                        new_perm = st.selectbox("Nível", perm_opts, index=index_perm)
+                    
+                    if st.button("💾 Atualizar Usuário"):
+                        atualizar_usuario(sheet, edit_user, new_city, new_status, new_perm)
+                        st.success(f"Dados de {edit_user} atualizados!")
+                        st.rerun()
 
-    for msg in st.session_state["mensagens"]:
-        st.chat_message(msg["role"]).write(msg["content"])
+    # ÁREA COMUM (CHAT E LEIS)
+    st.divider()
+    cidades_permitidas = user.get('cities', 'Nenhuma')
+    st.subheader(f"Jurisprudência: {cidades_permitidas}")
+    
+    # Upload (Apenas se tiver permissão)
+    if "UPLOAD" in permissions:
+        uploaded_file = st.file_uploader("Enviar nova Lei (PDF)", type="pdf")
+        if uploaded_file:
+            st.success("Arquivo recebido temporariamente (Conectaremos o Drive na próxima etapa!)")
 
-    # Campo de Pergunta
-    if pergunta := st.chat_input("Ex: Qual a alíquota de ISS para serviços médicos?"):
-        # Mostra pergunta do usuário
-        st.session_state["mensagens"].append({"role": "user", "content": pergunta})
-        st.chat_message("user").write(pergunta)
-        
-        # Gera resposta da IA
-        with st.spinner("🧠 Analisando legislação e jurisprudência..."):
-            resposta = consultar_advogado(pergunta)
-        
-        # Mostra resposta da IA
-        st.session_state["mensagens"].append({"role": "ai", "content": resposta})
-        st.chat_message("ai").write(resposta)
+    # Chat com IA
+    prompt = st.chat_input("Pergunte sobre as leis municipais...")
+    if prompt:
+        with st.chat_message("user"):
+            st.write(prompt)
+        with st.chat_message("assistant"):
+            st.write("🤖 Analisando sua pergunta...")
+            # Lógica do Gemini conectada aqui
+            try:
+                model = genai.GenerativeModel('gemini-1.5-flash')
+                response = model.generate_content(f"O usuário perguntou: {prompt}. Responda como um assistente jurídico.")
+                st.write(response.text)
+            except Exception as e:
+                st.error(f"Erro na IA: {e}")
