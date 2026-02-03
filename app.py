@@ -3,24 +3,101 @@ import google.generativeai as genai
 import pandas as pd
 import hashlib
 import gspread
-from oauth2client.service_account import ServiceAccountCredentials
+from google.oauth2 import service_account
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaIoBaseUpload
 import json
+from datetime import datetime
 
 # --- CONFIGURAÇÃO DA PÁGINA ---
 st.set_page_config(page_title="Leis Municipais IA", layout="wide")
 
-# --- CONEXÃO COM GOOGLE SHEETS ---
-def connect_to_sheets():
+# --- ID DA PASTA DO DRIVE ---
+PASTA_DRIVE_ID = "1lJrCodOa3YPRU_6ak5rUpGGP20bOjeMl"
+
+# --- CONEXÃO COM GOOGLE (DRIVE + SHEETS) ---
+def connect_google():
     try:
-        scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+        # Carrega credenciais dos Secrets
         creds_dict = json.loads(st.secrets["connections"]["gsheets"]["creds"])
-        creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
-        client = gspread.authorize(creds)
-        sheet = client.open("base_juridica_ia")
-        return sheet
+        
+        # Define escopos para Drive e Planilhas
+        scopes = [
+            "https://www.googleapis.com/auth/drive",
+            "https://www.googleapis.com/auth/spreadsheets"
+        ]
+        
+        creds = service_account.Credentials.from_service_account_info(
+            creds_dict, scopes=scopes
+        )
+        
+        # Conecta nos serviços
+        drive_service = build('drive', 'v3', credentials=creds)
+        client_sheets = gspread.authorize(creds)
+        sheet = client_sheets.open("base_juridica_ia")
+        
+        return drive_service, sheet
     except Exception as e:
-        st.error(f"Erro ao conectar na planilha: {e}")
+        st.error(f"Erro na conexão Google: {e}")
+        return None, None
+
+# --- FUNÇÕES DE ARQUIVO E DRIVE ---
+def salvar_arquivo_drive(drive_service, arquivo_upload, nome_arquivo, pasta_id):
+    try:
+        file_metadata = {
+            'name': nome_arquivo,
+            'parents': [pasta_id]
+        }
+        media = MediaIoBaseUpload(arquivo_upload, mimetype='application/pdf')
+        
+        file = drive_service.files().create(
+            body=file_metadata,
+            media_body=media,
+            fields='id, webViewLink'
+        ).execute()
+        
+        return file.get('webViewLink')
+    except Exception as e:
+        st.error(f"Erro no Upload para o Drive: {e}")
         return None
+
+def calcular_hash(arquivo):
+    # Calcula um código único para o arquivo (evita duplicatas e garante integridade)
+    pos_original = arquivo.tell()
+    arquivo.seek(0)
+    file_hash = hashlib.md5(arquivo.read()).hexdigest()
+    arquivo.seek(pos_original)
+    return file_hash
+
+def registrar_lei_na_planilha(sheet, cidade, nome_arq, link, usuario_logado, arquivo_upload):
+    try:
+        worksheet = sheet.worksheet("leis")
+        data_hoje = datetime.now().strftime("%d/%m/%Y")
+        
+        # 1. Calcula o Hash
+        hash_arquivo = calcular_hash(arquivo_upload)
+        
+        # 2. Cria o Filename clicável (Fórmula do Sheets)
+        filename_clicavel = f'=HYPERLINK("{link}"; "{nome_arq}")'
+        
+        # 3. Define o texto completo (VAZIO por enquanto, para economizar espaço)
+        texto_completo = "" 
+        
+        # Colunas exatas da sua planilha: 
+        # filename; upload_date; uploader; city; full_text; file_hash
+        worksheet.append_row([
+            filename_clicavel, 
+            data_hoje, 
+            usuario_logado, 
+            cidade, 
+            texto_completo, 
+            hash_arquivo
+        ], value_input_option='USER_ENTERED') 
+        
+        return True
+    except Exception as e:
+        st.error(f"Erro ao salvar na planilha: {e}")
+        return False
 
 # --- FUNÇÕES DE SEGURANÇA E USUÁRIOS ---
 def hash_password(password):
@@ -58,7 +135,7 @@ except:
 
 # --- INTERFACE PRINCIPAL ---
 
-sheet = connect_to_sheets()
+drive_service, sheet = connect_google()
 
 if "logado" not in st.session_state:
     st.session_state["logado"] = False
@@ -123,9 +200,8 @@ if not st.session_state["logado"]:
 else:
     user = st.session_state["usuario_atual"]
     
-    # --- BARRA LATERAL (AGORA COM IDENTIDADE VISUAL) ---
+    # --- BARRA LATERAL ---
     with st.sidebar:
-        # AQUI ESTÁ A MÁGICA: O MESMO BLOCO HTML, AJUSTADO PARA O SIDEBAR
         st.markdown("""
             <h2 style='margin-bottom: -10px;'>🏛️ Leis Municipais IA</h2>
             <small style='color: grey; font-size: 11px;'>© Lopes & Souto Advogados Associados</small>
@@ -135,14 +211,13 @@ else:
         st.header(f"Olá, {user['name']}")
         st.caption(f"Perfil: {user.get('permissions', 'LER')}")
         
-        # Lista de Cidades
         st.divider()
         st.subheader("📍 Seus Acessos")
         lista_cidades_raw = str(user.get('cities', '')).split(',')
         lista_cidades = [c.strip() for c in lista_cidades_raw if c.strip() != ""]
         
         if "TODAS" in user.get('cities', ''):
-             st.info("🌍 Acesso Global (Todas as Cidades)")
+             st.info("🌍 Acesso Global")
              if len(lista_cidades) <= 1:
                  lista_cidades = ["São Paulo", "Rio de Janeiro", "Belo Horizonte"]
         else:
@@ -155,7 +230,6 @@ else:
             st.session_state["cidade_selecionada"] = None
             st.rerun()
 
-        # Alterar Senha
         with st.expander("🔑 Alterar Senha"):
             senha_atual = st.text_input("Senha Atual", type="password")
             nova_senha_1 = st.text_input("Nova Senha", type="password")
@@ -196,17 +270,46 @@ else:
         with col_titulo:
             st.title(f"🏛️ Painel: {cidade_atual}")
         
-        # ESTATÍSTICAS
+        # ESTATÍSTICAS REAIS (Contando da Planilha)
+        total_organica = 0
+        total_compl = 0
+        total_ordinaria = 0
+        total_decreto = 0
+        
+        # Tenta ler a aba 'leis' para contar
+        try:
+            if sheet:
+                ws_leis = sheet.worksheet("leis")
+                todas_leis = ws_leis.get_all_records()
+                df_leis = pd.DataFrame(todas_leis)
+                
+                # Filtra pela cidade atual e conta baseado no nome do arquivo
+                if not df_leis.empty and 'city' in df_leis.columns:
+                    df_cidade = df_leis[df_leis['city'] == cidade_atual]
+                    
+                    # Como não temos coluna 'tipo', procuramos o texto dentro do 'filename'
+                    # pois salvamos como "Cidade_Tipo_Nome"
+                    total_organica = df_cidade['filename'].astype(str).str.contains("Lei Orgânica").sum()
+                    total_compl = df_cidade['filename'].astype(str).str.contains("Lei Complementar").sum()
+                    total_ordinaria = df_cidade['filename'].astype(str).str.contains("Lei Ordinária").sum()
+                    total_decreto = df_cidade['filename'].astype(str).str.contains("Decreto").sum()
+        except Exception as e:
+            # st.error(f"Erro estatistica: {e}") # Comentado para não sujar a tela se estiver vazia
+            pass
+
         st.markdown("### 📊 Acervo Digital")
         col1, col2, col3, col4 = st.columns(4)
-        col1.metric("Lei Orgânica", "0", help="Conectaremos na V4.0")
-        col2.metric("Leis Complementares", "0", help="Conectaremos na V4.0")
-        col3.metric("Leis Ordinárias", "0", help="Conectaremos na V4.0")
-        col4.metric("Decretos", "0", help="Conectaremos na V4.0")
+        col1.metric("Lei Orgânica", int(total_organica))
+        col2.metric("Leis Complementares", int(total_compl))
+        col3.metric("Leis Ordinárias", int(total_ordinaria))
+        col4.metric("Decretos", int(total_decreto))
         
         with st.expander("📂 Visualizar Índice Completo"):
-            st.write("A lista de arquivos aparecerá aqui após a integração com o Banco de Dados.")
-            st.button("🖨️ Imprimir Relatório", disabled=True)
+            if 'df_cidade' in locals() and not df_cidade.empty:
+                # Mostra apenas colunas relevantes para o usuário
+                st.dataframe(df_cidade[['upload_date', 'filename', 'uploader']])
+            else:
+                st.info("Nenhum documento encontrado para esta cidade.")
 
         st.divider()
 
@@ -225,7 +328,8 @@ else:
                     st.write("🤖 Analisando...")
                     try:
                         model = genai.GenerativeModel('gemini-1.5-flash')
-                        response = model.generate_content(f"Contexto: Leis do município de {cidade_atual}. Pergunta do usuário: {prompt}")
+                        # Prompt básico (sem injeção de texto por enquanto)
+                        response = model.generate_content(f"Você é um assistente jurídico especialista em {cidade_atual}. Responda: {prompt}")
                         st.write(response.text)
                     except Exception as e:
                         st.error(f"Erro na IA: {e}")
@@ -235,7 +339,30 @@ else:
                 st.write("Envie novos arquivos para a base desta cidade.")
                 uploaded_file = st.file_uploader("Selecione o PDF", type="pdf")
                 tipo_lei = st.selectbox("Tipo de Norma", ["Lei Ordinária", "Lei Complementar", "Decreto", "Lei Orgânica"])
-                if uploaded_file and st.button("Salvar no Banco de Dados"):
-                    st.success(f"Arquivo recebido! Na V4.0 ele será salvo na pasta de '{cidade_atual}'.")
+                
+                if uploaded_file and st.button("📤 Salvar no Banco de Dados"):
+                    with st.spinner("Enviando para o Google Drive..."):
+                        # 1. Salvar no Drive
+                        nome_final = f"{cidade_atual}_{tipo_lei}_{uploaded_file.name}"
+                        link_drive = salvar_arquivo_drive(drive_service, uploaded_file, nome_final, PASTA_DRIVE_ID)
+                        
+                        if link_drive:
+                            # 2. Registrar na Planilha
+                            sucesso = registrar_lei_na_planilha(
+                                sheet, 
+                                cidade_atual, 
+                                nome_final, 
+                                link_drive, 
+                                user['username'], 
+                                uploaded_file
+                            )
+                            if sucesso:
+                                st.success(f"Sucesso! Arquivo salvo e registrado.")
+                                st.balloons()
+                                st.cache_data.clear()
+                            else:
+                                st.error("Salvo no Drive, mas erro ao registrar na planilha.")
+                        else:
+                            st.error("Erro ao salvar no Google Drive.")
             else:
                 st.warning("Você não tem permissão para enviar arquivos.")
