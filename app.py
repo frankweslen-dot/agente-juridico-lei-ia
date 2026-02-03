@@ -6,13 +6,12 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 import json
 
-# --- CONFIGURAÇÃO DA PÁGINA (PEDIDO 1: NOME NO NAVEGADOR) ---
+# --- CONFIGURAÇÃO DA PÁGINA ---
 st.set_page_config(page_title="Leis Municipal IA", layout="wide")
 
 # --- CONEXÃO COM GOOGLE SHEETS ---
 def connect_to_sheets():
     try:
-        # Pega as credenciais do cofre do Streamlit
         scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
         creds_dict = json.loads(st.secrets["connections"]["gsheets"]["creds"])
         creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
@@ -35,23 +34,19 @@ def carregar_usuarios(sheet):
 def registrar_usuario(sheet, nome, usuario, senha):
     worksheet = sheet.worksheet("usuarios")
     senha_hash = hash_password(senha)
-    # Adiciona: username, password, name, cities, permissions, status
     worksheet.append_row([usuario, senha_hash, nome, "NENHUMA", "LER", "Pendente"])
 
 def atualizar_usuario(sheet, usuario_alvo, nova_cidade, novo_status, nova_permissao):
     worksheet = sheet.worksheet("usuarios")
     cell = worksheet.find(usuario_alvo)
-    # Colunas: D=4 (Cidades), E=5 (Permissões), F=6 (Status)
     worksheet.update_cell(cell.row, 4, nova_cidade)
     worksheet.update_cell(cell.row, 5, nova_permissao)
     worksheet.update_cell(cell.row, 6, novo_status)
 
-# (PEDIDO 3: NOVA FUNÇÃO PARA TROCAR SENHA)
 def alterar_senha_usuario(sheet, usuario_alvo, nova_senha):
     worksheet = sheet.worksheet("usuarios")
     cell = worksheet.find(usuario_alvo)
     nova_senha_hash = hash_password(nova_senha)
-    # Coluna B (2) é a senha
     worksheet.update_cell(cell.row, 2, nova_senha_hash)
 
 # --- CONFIGURAÇÃO GEMINI ---
@@ -68,14 +63,19 @@ sheet = connect_to_sheets()
 if "logado" not in st.session_state:
     st.session_state["logado"] = False
     st.session_state["usuario_atual"] = {}
+if "cidade_selecionada" not in st.session_state:
+    st.session_state["cidade_selecionada"] = None
 
 # TELA DE LOGIN / CADASTRO
 if not st.session_state["logado"]:
-    # (PEDIDO 1: NOME NA TELA DE LOGIN)
     st.title("🏛️ Leis Municipal IA")
+    # --- AQUI ESTÁ A SUA ALTERAÇÃO VISUAL ---
+    st.markdown("###### © by Lopes & Souto Advogados Associados") 
+    st.markdown("---") # Uma linha separadora para ficar bonito
+    
     tab1, tab2 = st.tabs(["Entrar", "Criar Conta"])
 
-    with tab1: # Login
+    with tab1:
         usuario = st.text_input("Usuário")
         senha = st.text_input("Senha", type="password")
         if st.button("Entrar"):
@@ -83,11 +83,9 @@ if not st.session_state["logado"]:
                 try:
                     df_users = carregar_usuarios(sheet)
                     user_match = df_users[df_users['username'] == usuario]
-                    
                     if not user_match.empty:
                         stored_pass = str(user_match.iloc[0]['password'])
                         status = str(user_match.iloc[0]['status']) if 'status' in user_match.columns else 'Aprovado'
-                        
                         if stored_pass == hash_password(senha):
                             if status == "Aprovado" or usuario == "admin":
                                 st.session_state["logado"] = True
@@ -102,7 +100,7 @@ if not st.session_state["logado"]:
                 except Exception as e:
                     st.error(f"Erro ao ler usuários: {e}")
 
-    with tab2: # Cadastro
+    with tab2:
         novo_nome = st.text_input("Nome Completo")
         novo_user = st.text_input("Escolha um Usuário")
         nova_senha = st.text_input("Escolha uma Senha", type="password")
@@ -122,83 +120,116 @@ if not st.session_state["logado"]:
 else:
     user = st.session_state["usuario_atual"]
     
-    # BARRA LATERAL
+    # --- BARRA LATERAL (Sidebar) ---
     with st.sidebar:
-        st.write(f"Olá, **{user['name']}**")
-        st.write(f"Permissão: `{user.get('permissions', 'LER')}`")
+        st.header(f"Olá, {user['name']}")
+        st.caption(f"Perfil: {user.get('permissions', 'LER')}")
         
-        # (PEDIDO 3: BOTÃO DE ALTERAR SENHA)
-        with st.expander("🔑 Alterar Senha"):
-            senha_atual = st.text_input("Senha Atual", type="password")
-            nova_senha_1 = st.text_input("Nova Senha", type="password")
-            nova_senha_2 = st.text_input("Confirmar Nova Senha", type="password")
-            
-            if st.button("Salvar Nova Senha"):
-                # Verifica senha atual
-                if hash_password(senha_atual) == str(user['password']):
-                    if nova_senha_1 == nova_senha_2 and nova_senha_1 != "":
-                        alterar_senha_usuario(sheet, user['username'], nova_senha_1)
-                        st.success("Senha alterada! Faça login novamente.")
-                        st.session_state["logado"] = False
-                        st.rerun()
-                    else:
-                        st.error("As novas senhas não coincidem.")
-                else:
-                    st.error("A senha atual está incorreta.")
+        # Lista de Cidades permitidas
+        st.divider()
+        st.subheader("📍 Seus Acessos")
+        lista_cidades_raw = str(user.get('cities', '')).split(',')
+        lista_cidades = [c.strip() for c in lista_cidades_raw if c.strip() != ""]
+        
+        if "TODAS" in user.get('cities', ''):
+             st.info("🌍 Acesso Global (Todas as Cidades)")
+             if len(lista_cidades) <= 1:
+                 lista_cidades = ["São Paulo", "Rio de Janeiro", "Belo Horizonte"] 
+        else:
+            for cidade in lista_cidades:
+                st.write(f"• {cidade}")
 
         st.divider()
         if st.button("Sair"):
             st.session_state["logado"] = False
+            st.session_state["cidade_selecionada"] = None
             st.rerun()
-    
-    # ÁREA DO ADMIN
-    permissions = str(user.get('permissions', ''))
-    if "DELETE" in permissions or user['username'] == 'admin':
-        with st.expander("👮 Painel de Gestão (Admin)", expanded=False):
-            if sheet:
-                df_users = carregar_usuarios(sheet)
-                lista_usuarios = df_users['username'].tolist()
-                edit_user = st.selectbox("Editar Usuário", lista_usuarios)
-                
-                if edit_user:
-                    user_data = df_users[df_users['username'] == edit_user].iloc[0]
-                    col1, col2, col3 = st.columns(3)
-                    with col1:
-                        current_status = user_data.get('status', 'Pendente')
-                        st_opts = ["Pendente", "Aprovado", "Bloqueado"]
-                        new_status = st.selectbox("Status", st_opts, index=st_opts.index(current_status) if current_status in st_opts else 0)
-                    with col2:
-                        new_city = st.text_input("Cidades", value=user_data.get('cities', ''))
-                    with col3:
-                        p_opts = ["LER", "LER,UPLOAD", "LER,UPLOAD,DELETE"]
-                        current_perm = user_data.get('permissions', 'LER')
-                        new_perm = st.selectbox("Nível", p_opts, index=p_opts.index(current_perm) if current_perm in p_opts else 0)
-                    
-                    if st.button("Atualizar Usuário"):
-                        atualizar_usuario(sheet, edit_user, new_city, new_status, new_perm)
-                        st.success("Usuário atualizado!")
+
+        # Botão alterar senha
+        with st.expander("🔑 Alterar Senha"):
+            senha_atual = st.text_input("Senha Atual", type="password")
+            nova_senha_1 = st.text_input("Nova Senha", type="password")
+            nova_senha_2 = st.text_input("Confirmar", type="password")
+            if st.button("Salvar"):
+                if hash_password(senha_atual) == str(user['password']):
+                    if nova_senha_1 == nova_senha_2 and nova_senha_1 != "":
+                        alterar_senha_usuario(sheet, user['username'], nova_senha_1)
+                        st.success("Senha alterada! Relogue.")
+                        st.session_state["logado"] = False
                         st.rerun()
-
-    # ÁREA PRINCIPAL
-    st.divider()
-    # (PEDIDO 2: TEXTO "NORMAS")
-    cidades_permitidas = user.get('cities', 'Nenhuma')
-    st.subheader(f"Normas: {cidades_permitidas}")
+                    else:
+                        st.error("Senhas não conferem.")
+                else:
+                    st.error("Senha atual errada.")
     
-    if "UPLOAD" in permissions:
-        uploaded_file = st.file_uploader("Enviar nova Lei (PDF)", type="pdf")
-        if uploaded_file:
-            st.success("Arquivo recebido temporariamente.")
+    # --- FLUXO DE SELEÇÃO DE CIDADE ---
+    
+    # Se ainda não escolheu cidade
+    if not st.session_state["cidade_selecionada"]:
+        st.title("Bem-vindo ao Sistema")
+        st.info("👈 Confira seus acessos na barra lateral.")
+        
+        st.subheader("Com qual município deseja trabalhar agora?")
+        
+        escolha = st.selectbox("Selecione na lista:", lista_cidades)
+        
+        if st.button(f"Acessar Painel de {escolha}"):
+            st.session_state["cidade_selecionada"] = escolha
+            st.rerun()
 
-    prompt = st.chat_input("Pergunte sobre as leis municipais...")
-    if prompt:
-        with st.chat_message("user"):
-            st.write(prompt)
-        with st.chat_message("assistant"):
-            st.write("🤖 Analisando...")
-            try:
-                model = genai.GenerativeModel('gemini-1.5-flash')
-                response = model.generate_content(f"O usuário perguntou: {prompt}. Responda como assistente jurídico.")
-                st.write(response.text)
-            except Exception as e:
-                st.error(f"Erro na IA: {e}")
+    # --- PAINEL DA CIDADE SELECIONADA ---
+    else:
+        cidade_atual = st.session_state["cidade_selecionada"]
+        
+        # Cabeçalho com botão de voltar
+        col_voltar, col_titulo = st.columns([1, 5])
+        with col_voltar:
+            if st.button("⬅ Trocar"):
+                st.session_state["cidade_selecionada"] = None
+                st.rerun()
+        with col_titulo:
+            st.title(f"🏛️ Painel: {cidade_atual}")
+        
+        # ESTATÍSTICAS (Placeholder - Vai funcionar na V4.0)
+        st.markdown("### 📊 Acervo Digital")
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("Lei Orgânica", "0", help="Conectaremos na V4.0")
+        col2.metric("Leis Complementares", "0", help="Conectaremos na V4.0")
+        col3.metric("Leis Ordinárias", "0", help="Conectaremos na V4.0")
+        col4.metric("Decretos", "0", help="Conectaremos na V4.0")
+        
+        with st.expander("📂 Visualizar Índice Completo (Lista de Arquivos)"):
+            st.write("A lista de arquivos aparecerá aqui após a integração com o Banco de Dados.")
+            st.button("🖨️ Imprimir Relatório", disabled=True)
+
+        st.divider()
+
+        # ÁREA DE TRABALHO (CHAT E UPLOAD)
+        permissions = str(user.get('permissions', ''))
+        
+        tab_consulta, tab_gestao = st.tabs(["💬 Consultar IA", "📤 Gestão de Arquivos"])
+        
+        with tab_consulta:
+            st.subheader(f"Assistente Jurídico de {cidade_atual}")
+            prompt = st.chat_input(f"Pergunte sobre as leis de {cidade_atual}...")
+            if prompt:
+                with st.chat_message("user"):
+                    st.write(prompt)
+                with st.chat_message("assistant"):
+                    st.write("🤖 Analisando...")
+                    try:
+                        model = genai.GenerativeModel('gemini-1.5-flash')
+                        response = model.generate_content(f"Contexto: Leis do município de {cidade_atual}. Pergunta do usuário: {prompt}")
+                        st.write(response.text)
+                    except Exception as e:
+                        st.error(f"Erro na IA: {e}")
+
+        with tab_gestao:
+            if "UPLOAD" in permissions:
+                st.write("Envie novos arquivos para a base desta cidade.")
+                uploaded_file = st.file_uploader("Selecione o PDF", type="pdf")
+                tipo_lei = st.selectbox("Tipo de Norma", ["Lei Ordinária", "Lei Complementar", "Decreto", "Lei Orgânica"])
+                if uploaded_file and st.button("Salvar no Banco de Dados"):
+                    st.success(f"Arquivo recebido! Na V4.0 ele será salvo na pasta de '{cidade_atual}'.")
+            else:
+                st.warning("Você não tem permissão para enviar arquivos.")
